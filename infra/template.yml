@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Codyssey B3-1 - single public EC2 web server in Seoul
+
+Parameters:
+  AdminCidr:
+    Type: String
+    Description: Learner's public IPv4 address with a /32 mask
+    AllowedPattern: '^(?!0\.0\.0\.0/32$)(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/32$'
+  PublicKey:
+    Type: String
+    Description: OpenSSH public key from the learner's key pair
+    AllowedPattern: '^ssh-ed25519 [A-Za-z0-9+/=]+$'
+  AmiId:
+    Type: AWS::EC2::Image::Id
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - {Key: Name, Value: codyssey-b3-1-vpc}
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - {Key: Name, Value: codyssey-b3-1-igw}
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - {Key: Name, Value: codyssey-b3-1-public}
+  PublicRoutes:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - {Key: Name, Value: codyssey-b3-1-public-rt}
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRoutes
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicSubnetRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRoutes
+      SubnetId: !Ref PublicSubnet
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public HTTP and learner-only SSH
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: Public HTTP}
+        - {IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref AdminCidr, Description: Learner SSH}
+      SecurityGroupEgress:
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS packages and connectivity check}
+      Tags:
+        - {Key: Name, Value: codyssey-b3-1-web-sg}
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: codyssey-b3-1-ssh
+      PublicKeyMaterial: !Ref PublicKey
+      Tags:
+        - {Key: Name, Value: codyssey-b3-1-ssh}
+  WebInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: [DefaultRoute, PublicSubnetRoutes]
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.micro
+      CreditSpecification:
+        CPUCredits: standard
+      KeyName: !Ref KeyPair
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          AssociatePublicIpAddress: false
+          DeleteOnTermination: true
+          GroupSet: [!Ref WebSecurityGroup]
+          SubnetId: !Ref PublicSubnet
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      PropagateTagsToVolumeOnCreation: true
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 8
+            Encrypted: true
+            KmsKeyId: alias/aws/ebs
+            DeleteOnTermination: true
+      UserData: '__BOOTSTRAP_BASE64__'
+      Tags:
+        - {Key: Name, Value: codyssey-b3-1-web}
+  WebAddress:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - {Key: Name, Value: codyssey-b3-1-eip}
+  WebAddressAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt WebAddress.AllocationId
+      InstanceId: !Ref WebInstance
+
+Outputs:
+  PublicIp:
+    Value: !Ref WebAddress
+  HealthUrl:
+    Value: !Sub 'http://${WebAddress}/health'
